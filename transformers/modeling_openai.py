@@ -28,9 +28,9 @@ from io import open
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
+from torch.utils.checkpoint import checkpoint
 from torch.nn.parameter import Parameter
 
-from .checkpoint import CheckpointFunction
 from .modeling_utils import PreTrainedModel, Conv1D, prune_conv1d_layer, SequenceSummary
 from .configuration_openai import OpenAIGPTConfig
 from .file_utils import add_start_docstrings
@@ -437,7 +437,8 @@ class OpenAIGPTModel(OpenAIGPTPreTrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states.view(*output_shape),)
 
             # outputs = block(hidden_states, attention_mask, head_mask[i])
-            outputs = CheckpointFunction.apply(block, 3, (hidden_states, attention_mask, head_mask[i]))
+            outputs = checkpoint(block, hidden_states, attention_mask, head_mask[i])
+            # outputs = CheckpointFunction.apply(block, 3, (hidden_states, attention_mask, head_mask[i]))
             hidden_states = outputs[0]
             if self.output_attentions:
                 all_attentions = all_attentions + (outputs[1],)
