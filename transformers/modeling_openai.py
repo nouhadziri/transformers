@@ -436,8 +436,8 @@ class OpenAIGPTModel(OpenAIGPTPreTrainedModel):
             if self.output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states.view(*output_shape),)
 
-            # outputs = block(hidden_states, attention_mask, head_mask[i])
-            outputs = checkpoint(block, hidden_states, attention_mask, head_mask[i])
+            outputs = block(hidden_states, attention_mask, head_mask[i])
+            # outputs = checkpoint(block, hidden_states, attention_mask, head_mask[i])
             # outputs = CheckpointFunction.apply(block, 3, (hidden_states, attention_mask, head_mask[i]))
             hidden_states = outputs[0]
             if self.output_attentions:
