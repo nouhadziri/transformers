@@ -30,6 +30,7 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.parameter import Parameter
 
+from .checkpoint import CheckpointFunction
 from .modeling_utils import PreTrainedModel, Conv1D, prune_conv1d_layer, SequenceSummary
 from .configuration_gpt2 import GPT2Config
 from .file_utils import add_start_docstrings
@@ -437,11 +438,11 @@ class GPT2Model(GPT2PreTrainedModel):
             if self.output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states.view(*output_shape),)
 
-            outputs = block(hidden_states,
-                            layer_past=layer_past,
-                            attention_mask=attention_mask,
-                            head_mask=head_mask[i])
-
+            # outputs = block(hidden_states,
+            #                 layer_past=layer_past,
+            #                 attention_mask=attention_mask,
+            #                 head_mask=head_mask[i])
+            outputs = CheckpointFunction.apply(block, 4, (hidden_states, layer_past, attention_mask, head_mask[i]))
             hidden_states, present = outputs[:2]
             if self.output_past:
                 presents = presents + (present,)
