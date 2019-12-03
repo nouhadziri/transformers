@@ -29,7 +29,6 @@ import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.parameter import Parameter
-# from torch.utils.checkpoint import checkpoint
 
 from .modeling_utils import PreTrainedModel, Conv1D, prune_conv1d_layer, SequenceSummary
 from .configuration_gpt2 import GPT2Config
@@ -40,6 +39,7 @@ logger = logging.getLogger(__name__)
 GPT2_PRETRAINED_MODEL_ARCHIVE_MAP = {"gpt2": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-pytorch_model.bin",
                                      "gpt2-medium": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-medium-pytorch_model.bin",
                                      "gpt2-large": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-large-pytorch_model.bin",
+                                     "gpt2-xl": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-xl-pytorch_model.bin",
                                      "distilgpt2": "https://s3.amazonaws.com/models.huggingface.co/bert/distilgpt2-pytorch_model.bin",}
 
 def load_tf_weights_in_gpt2(model, config, gpt2_checkpoint_path):
@@ -237,7 +237,7 @@ class Block(nn.Module):
         x = x + m
 
         outputs = [x] + output_attn[1:]
-        return tuple(outputs)  # x, present, (attentions)
+        return outputs  # x, present, (attentions)
 
 
 class GPT2PreTrainedModel(PreTrainedModel):
@@ -298,7 +298,8 @@ GPT2_INPUTS_DOCSTRING = r"""    Inputs:
         **past**:
             list of ``torch.FloatTensor`` (one for each layer):
             that contains pre-computed hidden-states (key and values in the attention blocks) as computed by the model
-            (see `past` output below). Can be used to speed up sequential decoding.
+            (see `past` output below). Can be used to speed up sequential decoding. The token ids which have their past given to this model 
+            should not be passed as input ids as they have already been computed.
         **attention_mask**: (`optional`) ``torch.FloatTensor`` of shape ``(batch_size, sequence_length)``:
             Mask to avoid performing attention on padding token indices.
             Mask values selected in ``[0, 1]``:
@@ -314,6 +315,10 @@ GPT2_INPUTS_DOCSTRING = r"""    Inputs:
             Mask to nullify selected heads of the self-attention modules.
             Mask values selected in ``[0, 1]``:
             ``1`` indicates the head is **not masked**, ``0`` indicates the head is **masked**.
+        **inputs_embeds**: (`optional`) ``torch.FloatTensor`` of shape ``(batch_size, sequence_length, embedding_dim)``:
+            Optionally, instead of passing ``input_ids`` you can choose to directly pass an embedded representation.
+            This is useful if you want more control over how to convert `input_ids` indices into associated vectors
+            than the model's internal embedding lookup matrix.
 """
 
 @add_start_docstrings("The bare GPT2 Model transformer outputting raw hidden-states without any specific head on top.",
@@ -326,7 +331,8 @@ class GPT2Model(GPT2PreTrainedModel):
         **past**:
             list of ``torch.FloatTensor`` (one for each layer) of shape ``(batch_size, num_heads, sequence_length, sequence_length)``:
             that contains pre-computed hidden-states (key and values in the attention blocks).
-            Can be used (see `past` input) to speed up sequential decoding.
+            Can be used (see `past` input) to speed up sequential decoding. The token ids which have their past given to this model 
+            should not be passed as input ids as they have already been computed.
         **hidden_states**: (`optional`, returned when ``config.output_hidden_states=True``)
             list of ``torch.FloatTensor`` (one for the output of each layer + the output of the embeddings)
             of shape ``(batch_size, sequence_length, hidden_size)``:
@@ -371,9 +377,17 @@ class GPT2Model(GPT2PreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
-    def forward(self, input_ids, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None):
-        input_shape = input_ids.size()
-        input_ids = input_ids.view(-1, input_shape[-1])
+    def forward(self, input_ids=None, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, inputs_embeds=None):
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+        elif input_ids is not None:
+            input_shape = input_ids.size()
+            input_ids = input_ids.view(-1, input_shape[-1])
+        elif inputs_embeds is not None:
+            input_shape = inputs_embeds.size()[:-1]
+        else:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+
         if token_type_ids is not None:
             token_type_ids = token_type_ids.view(-1, input_shape[-1])
         if position_ids is not None:
@@ -385,25 +399,19 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             past_length = past[0][0].size(-2)
         if position_ids is None:
-            position_ids = torch.arange(past_length, input_ids.size(-1) + past_length, dtype=torch.long, device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+            device = input_ids.device if input_ids is not None else inputs_embeds.device
+            position_ids = torch.arange(past_length, input_shape[-1] + past_length, dtype=torch.long, device=device)
+            position_ids = position_ids.unsqueeze(0).view(-1, input_shape[-1])
 
         # Attention mask.
         if attention_mask is not None:
-            attn_mask_size = attention_mask.size()
-            if len(attn_mask_size) == 3:
-                # *** Modified (if the mask is 3D)
-                # Sizes are [batch_size, 1, seq_length, seq_length]
-                # **** End of Modified
-                attention_mask = attention_mask.unsqueeze(1)
-            else:
-                attention_mask = attention_mask.view(-1, input_shape[-1])
-                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            attention_mask = attention_mask.view(-1, input_shape[-1])
             # We create a 3D attention mask from a 2D tensor mask.
             # Sizes are [batch_size, 1, 1, to_seq_length]
             # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
             # this attention mask is more simple than the triangular masking of causal attention
             # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
 
             # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
             # masked positions, this operation will create a tensor which is 0.0 for
@@ -427,7 +435,8 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             head_mask = [None] * self.config.n_layer
 
-        inputs_embeds = self.wte(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
@@ -449,8 +458,7 @@ class GPT2Model(GPT2PreTrainedModel):
                             layer_past=layer_past,
                             attention_mask=attention_mask,
                             head_mask=head_mask[i])
-            # outputs = checkpoint(block, hidden_states, layer_past, attention_mask, head_mask[i])
-            # outputs = CheckpointFunction.apply(block, 4, (hidden_states, layer_past, attention_mask, head_mask[i]))
+
             hidden_states, present = outputs[:2]
             if self.output_past:
                 presents = presents + (present,)
@@ -497,7 +505,8 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         **past**:
             list of ``torch.FloatTensor`` (one for each layer) of shape ``(batch_size, num_heads, sequence_length, sequence_length)``:
             that contains pre-computed hidden-states (key and values in the attention blocks).
-            Can be used (see `past` input) to speed up sequential decoding.
+            Can be used (see `past` input) to speed up sequential decoding. The token ids which have their past given to this model 
+            should not be passed as input ids as they have already been computed.
         **hidden_states**: (`optional`, returned when ``config.output_hidden_states=True``)
             list of ``torch.FloatTensor`` (one for the output of each layer + the output of the embeddings)
             of shape ``(batch_size, sequence_length, hidden_size)``:
@@ -529,14 +538,15 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
     def get_output_embeddings(self):
         return self.lm_head
 
-    def forward(self, input_ids, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
+    def forward(self, input_ids=None, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, inputs_embeds=None,
                 labels=None):
         transformer_outputs = self.transformer(input_ids,
                                                past=past,
                                                attention_mask=attention_mask,
                                                token_type_ids=token_type_ids,
                                                position_ids=position_ids,
-                                               head_mask=head_mask)
+                                               head_mask=head_mask,
+                                               inputs_embeds=inputs_embeds)
         hidden_states = transformer_outputs[0]
 
         lm_logits = self.lm_head(hidden_states)
@@ -588,7 +598,8 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
         **past**:
             list of ``torch.FloatTensor`` (one for each layer) of shape ``(batch_size, num_heads, sequence_length, sequence_length)``:
             that contains pre-computed hidden-states (key and values in the attention blocks).
-            Can be used (see `past` input) to speed up sequential decoding.
+            Can be used (see `past` input) to speed up sequential decoding. The token ids which have their past given to this model 
+            should not be passed as input ids as they have already been computed.
         **hidden_states**: (`optional`, returned when ``config.output_hidden_states=True``)
             list of ``torch.FloatTensor`` (one for the output of each layer + the output of the embeddings)
             of shape ``(batch_size, sequence_length, hidden_size)``:
@@ -632,14 +643,15 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
     def get_output_embeddings(self):
         return self.lm_head
 
-    def forward(self, input_ids, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
+    def forward(self, input_ids=None, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, inputs_embeds=None,
                 mc_token_ids=None, lm_labels=None, mc_labels=None):
         transformer_outputs = self.transformer(input_ids,
                                                past=past,
                                                attention_mask=attention_mask,
                                                token_type_ids=token_type_ids,
                                                position_ids=position_ids,
-                                               head_mask=head_mask)
+                                               head_mask=head_mask,
+                                               inputs_embeds=inputs_embeds)
 
         hidden_states = transformer_outputs[0]
 
@@ -661,3 +673,4 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
             outputs = (loss,) + outputs
 
         return outputs  # (lm loss), (mc loss), lm logits, mc logits, presents, (all hidden_states), (attentions)
+>>>>>>> 8101924a6812ffb09c54c2af85d2182f9a81db20
