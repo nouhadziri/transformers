@@ -405,7 +405,6 @@ class GPT2Model(GPT2PreTrainedModel):
 
         # Attention mask.
         if attention_mask is not None:
-            attention_mask = attention_mask.view(-1, input_shape[-1])
             attn_mask_size = attention_mask.size()
             if len(attn_mask_size) == 3:
                 # *** Modified (if the mask is 3D)
