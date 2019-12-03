@@ -406,12 +406,20 @@ class GPT2Model(GPT2PreTrainedModel):
         # Attention mask.
         if attention_mask is not None:
             attention_mask = attention_mask.view(-1, input_shape[-1])
-            # We create a 3D attention mask from a 2D tensor mask.
-            # Sizes are [batch_size, 1, 1, to_seq_length]
-            # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
-            # this attention mask is more simple than the triangular masking of causal attention
-            # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            attn_mask_size = attention_mask.size()
+            if len(attn_mask_size) == 3:
+                # *** Modified (if the mask is 3D)
+                # Sizes are [batch_size, 1, seq_length, seq_length]
+                # **** End of Modified
+                attention_mask = attention_mask.unsqueeze(1)
+            else:
+                # We create a 3D attention mask from a 2D tensor mask.
+                # Sizes are [batch_size, 1, 1, to_seq_length]
+                # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+                # this attention mask is more simple than the triangular masking of causal attention
+                # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+                attention_mask = attention_mask.view(-1, input_shape[-1])
+                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
 
             # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
             # masked positions, this operation will create a tensor which is 0.0 for
@@ -673,4 +681,3 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
             outputs = (loss,) + outputs
 
         return outputs  # (lm loss), (mc loss), lm logits, mc logits, presents, (all hidden_states), (attentions)
->>>>>>> 8101924a6812ffb09c54c2af85d2182f9a81db20
